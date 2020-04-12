@@ -10,9 +10,11 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strings"
 )
 
 var gcrMatcher = regexp.MustCompile(`https://([a-z]+\.|)gcr\.io/`)
+var repositoryMatcher = regexp.MustCompile(`^/v2/(.+)/blobs/uploads/(?:[^/]+)?$|^/v2/(.+)/[^/]+/[^/]+$`)
 
 // TokenTransport defines the data structure for authentication via tokens.
 type TokenTransport struct {
@@ -58,7 +60,35 @@ func (t authToken) String() (string, error) {
 	return "", errors.New("auth token cannot be empty")
 }
 
+func (a *authService) autoSetScope(req *http.Request) {
+	var method, repository string
+	switch req.Method {
+	case http.MethodGet:
+		method = "pull"
+	case http.MethodPost, http.MethodPut, http.MethodPatch:
+		method = "push"
+	case http.MethodDelete:
+		method = "*"
+	}
+
+	if m := repositoryMatcher.FindStringSubmatch(req.URL.Path); m != nil {
+		if m[1] != "" {
+			repository = m[1]
+		} else {
+			repository = m[2]
+		}
+	}
+
+	if method != "" && repository != "" {
+		scope_components := []string{"repository", repository, method}
+		a.Scope = append(a.Scope, strings.Join(scope_components, ":"))
+	}
+}
+
 func (t *TokenTransport) authAndRetry(authService *authService, req *http.Request) (*http.Response, error) {
+	if len(authService.Scope) < 1 {
+		authService.autoSetScope(req)
+	}
 	token, authResp, err := t.auth(req.Context(), authService)
 	if err != nil {
 		return authResp, err
@@ -113,7 +143,9 @@ type authService struct {
 
 func (a *authService) Request(username, password string) (*http.Request, error) {
 	q := a.Realm.Query()
-	q.Set("service", a.Service)
+	if len(a.Service) > 0 {
+		q.Set("service", a.Service)
+	}
 	for _, s := range a.Scope {
 		q.Set("scope", s)
 	}
